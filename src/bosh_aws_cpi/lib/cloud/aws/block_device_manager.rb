@@ -70,6 +70,10 @@ module Bosh::AwsCloud
     def ephemeral_disk_mapping(instance_type, disk_info)
       ephemeral_disk = @vm_type.ephemeral_disk
 
+      if ephemeral_disk.encrypted && ephemeral_disk.kms_key_arn
+
+      end
+
       if ephemeral_disk.use_instance_storage
         if @vm_type.raw_instance_storage?
           raise Bosh::Clouds::CloudError, 'ephemeral_disk.use_instance_storage and raw_instance_storage cannot both be true'

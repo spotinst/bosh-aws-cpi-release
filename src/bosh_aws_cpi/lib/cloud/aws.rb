@@ -16,6 +16,9 @@ require 'common/thread_formatter'
 
 require 'bosh/cpi/registry_client'
 
+require 'cloud/cpi/disks'
+require 'cloud/aws/sdk_helpers/volume_manager'
+
 require 'cloud'
 require 'cloud/aws/helpers'
 require 'cloud/aws/cloud'
