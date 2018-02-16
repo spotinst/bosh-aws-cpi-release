@@ -41,8 +41,11 @@ module Bosh::AwsCloud
         @config.registry.password
       )
 
+      spotinst_provider = Bosh::AwsCloud::Spotinst::Provider.new(@config.spotinst, @logger)
+      @spotinst_manager = Bosh::AwsCloud::Spotinst::Manager.new(spotinst_provider.client, @ec2_resource, @registry, @logger)
+
       @volume_manager = Bosh::AwsCloud::VolumeManager.new(@logger, @aws_provider)
-      @instance_manager = InstanceManager.new(@ec2_resource, registry, @logger)
+      @instance_manager = InstanceManager.new(@spotinst_manager, @ec2_resource, registry, @logger)
       @instance_type_mapper = InstanceTypeMapper.new
 
       @props_factory = Bosh::AwsCloud::PropsFactory.new(@config)
@@ -169,7 +172,7 @@ module Bosh::AwsCloud
     def delete_vm(instance_id)
       with_thread_name("delete_vm(#{instance_id})") do
         logger.info("Deleting instance '#{instance_id}'")
-        @instance_manager.find(instance_id).terminate(@config.aws.fast_path_delete?)
+        @instance_manager.delete(instance_id, fast: @config.aws.fast_path_delete?)
       end
     end
 
@@ -213,6 +216,8 @@ module Bosh::AwsCloud
       end
 
       TagManager.tags(instance, metadata)
+      @spotinst_manager.tag_instance(vm, metadata)
+
     rescue Aws::EC2::Errors::TagLimitExceeded => e
       logger.error("could not tag #{instance.id}: #{e.message}")
     end

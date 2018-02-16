@@ -167,3 +167,13 @@ properties:
     description: Https proxy to connect to cloud API's
   env.no_proxy:
     description: No proxy environment variable
+
+  spotinst.credentials_source:
+    description: Where to get Spotinst credentials for the aws cpi. This can be set to `static` to use a `token` and `account`.
+    default: static
+  spotinst.token:
+    description: Spotinst token (Required when spotinst.credentials_source is set to `static`)
+    default: null
+  spotinst.account:
+    description: Spotinst account (Optional)
+    default: null

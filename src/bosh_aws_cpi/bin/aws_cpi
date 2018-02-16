@@ -20,6 +20,7 @@ cpi_lambda = lambda do |context|
   cloud_properties = cpi_config['cloud']['properties']
 
   cloud_properties['aws'].merge!(context)
+  cloud_properties['spotinst'].merge!(context)
 
   Bosh::Clouds::Aws.new(cloud_properties)
 end

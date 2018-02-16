@@ -95,6 +95,8 @@ module Bosh::AwsCloud
     attr_reader :advertised_routes
     # AWS Permissions: ec2:ModifyInstanceAttribute
     attr_reader :source_dest_check
+    # Spotinst properties
+    attr_reader :spotinst_disabled, :spotinst_risk, :spotinst_product
 
     # @param [Hash] cloud_properties
     # @param [Bosh::AwsCloud::Config] global_config
@@ -125,6 +127,10 @@ module Bosh::AwsCloud
 
       @root_disk = RootDisk.new(@cloud_properties['root_disk'])
       @cloud_properties['root_disk'] = @root_disk.disk if !@root_disk.disk.nil?
+
+      @spotinst_disabled = !!cloud_properties['spotinst_disabled']
+      @spotinst_risk = cloud_properties['spotinst_risk'].nil? ? 100 : cloud_properties['spotinst_risk']
+      @spotinst_product = cloud_properties['spotinst_product'] || 'Linux/UNIX'
     end
 
     def custom_encryption?

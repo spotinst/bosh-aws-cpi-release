@@ -50,6 +50,31 @@ module Bosh::AwsCloud
     end
   end
 
+  class SpotinstConfig
+    attr_reader :token, :account, :credentials
+
+    CREDENTIALS_SOURCE_STATIC = 'static'.freeze
+
+    def initialize(spotinst_config_hash)
+      @config = spotinst_config_hash
+
+      @token = @config['token']
+      @account = @config['account']
+
+      # credentials_source could be static (default) or env_or_profile
+      # - if "static", credentials must be provided
+      @credentials_source = @config['credentials_source'] || CREDENTIALS_SOURCE_STATIC
+      @credentials =
+        if @credentials_source == CREDENTIALS_SOURCE_STATIC
+          Spotinst::Credentials.new(@token, @account)
+        end
+    end
+
+    def to_h
+      @config
+    end
+  end
+
   class RegistryConfig
     attr_reader :endpoint, :user, :password
 
@@ -73,7 +98,7 @@ module Bosh::AwsCloud
   end
 
   class Config
-    attr_reader :aws, :registry, :agent
+    attr_reader :aws, :spotinst, :registry, :agent
 
     def self.build(config_hash)
       Config.validate(config_hash)
@@ -90,6 +115,7 @@ module Bosh::AwsCloud
     def initialize(config_hash)
       @config = config_hash
       @aws = AwsConfig.new(config_hash['aws'] || {})
+      @spotinst = SpotinstConfig.new(config_hash['spotinst'] || {})
       @registry = RegistryConfig.new(config_hash['registry'] || {})
       @agent = AgentConfig.new(config_hash['agent'] || {})
     end
@@ -136,6 +162,18 @@ module Bosh::AwsCloud
       if credentials_source == AwsConfig::CREDENTIALS_SOURCE_ENV_OR_PROFILE
         if !options['aws']['access_key_id'].nil? || !options['aws']['secret_access_key'].nil?
           raise ArgumentError, "Can't use access_key_id and secret_access_key with env_or_profile credentials_source"
+        end
+      end
+
+      credentials_source = options['spotinst']['credentials_source'] || SpotinstConfig::CREDENTIALS_SOURCE_STATIC
+
+      if credentials_source != 'static'
+        raise ArgumentError, "Unknown credentials_source #{credentials_source}"
+      end
+
+      if credentials_source == 'static'
+        if options['spotinst']['token'].nil?
+          raise ArgumentError, 'Must use spotinst.token with static spotinst.credentials_source'
         end
       end
     end

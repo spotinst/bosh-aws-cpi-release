@@ -6,7 +6,8 @@ module Bosh::AwsCloud
   class InstanceManager
     include Helpers
 
-    def initialize(ec2, registry, logger)
+    def initialize(spotinst, ec2, registry, logger)
+      @spotinst = spotinst
       @ec2 = ec2
       @registry = registry
       @logger = logger
@@ -51,6 +52,11 @@ module Bosh::AwsCloud
       end
 
       instance
+    end
+
+    def delete(instance_id, fast: false)
+      terminated = @spotinst.delete_instance(instance_id)
+      find(instance_id).terminate(fast) unless terminated
     end
 
     # @param [String] instance_id EC2 instance id
@@ -107,6 +113,14 @@ module Bosh::AwsCloud
     end
 
     def create_aws_instance(instance_params, vm_cloud_props)
+      instance_params[:min_count] = 1
+      instance_params[:max_count] = 1
+
+      unless vm_cloud_props.spotinst_disabled
+        @logger.debug('Handling creation request with Spotinst provider')
+        return @spotinst.create_instance(instance_params, vm_cloud_props)
+      end
+
       if vm_cloud_props.spot_bid_price
         begin
           return create_aws_spot_instance(instance_params, vm_cloud_props.spot_bid_price)
@@ -120,9 +134,6 @@ module Bosh::AwsCloud
           end
         end
       end
-
-      instance_params[:min_count] = 1
-      instance_params[:max_count] = 1
 
       # Retry the create instance operation a couple of times if we are told that the IP
       # address is in use - it can happen when the director recreates a VM and AWS
