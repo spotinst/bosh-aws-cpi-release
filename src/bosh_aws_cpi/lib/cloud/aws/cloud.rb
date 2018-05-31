@@ -41,8 +41,11 @@ module Bosh::AwsCloud
         @config.registry.password
       )
 
+      spotinst_provider = Bosh::AwsCloud::Spotinst::Provider.new(@config.spotinst, @logger)
+      @spotinst_manager = Bosh::AwsCloud::Spotinst::Manager.new(spotinst_provider.client, @ec2_resource, @registry, @logger)
+
       @volume_manager = Bosh::AwsCloud::VolumeManager.new(@logger, @aws_provider)
-      @instance_manager = InstanceManager.new(@ec2_resource, registry, @logger)
+      @instance_manager = InstanceManager.new(@spotinst_manager, @ec2_resource, registry, @logger)
       @instance_type_mapper = InstanceTypeMapper.new
 
       @props_factory = Bosh::AwsCloud::PropsFactory.new(@config)
@@ -129,17 +132,21 @@ module Bosh::AwsCloud
 
           target_groups.each do |target_group_name|
             target_group = LBTargetGroup.new(client: @aws_provider.alb_client, group_name: target_group_name)
-            target_group.register(instance.id)
+            target_group.register(instance.ec2_instance.id)
           end
 
           requested_elbs.each do |requested_elb_name|
             requested_elb = ClassicLB.new(client: @aws_provider.elb_client, elb_name: requested_elb_name)
-            requested_elb.register(instance.id)
+            requested_elb.register(instance.ec2_instance.id)
           end
 
-          logger.info("Creating new instance '#{instance.id}'")
+          @spotinst_manager.register_load_balancers(instance.elastigroup_id, requested_elbs, target_groups)
 
-          NetworkConfigurator.new(network_props).configure(@ec2_resource, instance)
+          logger.info("Creating new instance #{instance}")
+
+          aws_instance = Bosh::AwsCloud::Instance.new(instance.ec2_instance, registry, logger)
+          NetworkConfigurator.new(network_props).configure(@ec2_resource, aws_instance)
+          @spotinst_manager.associate_elastic_ip(instance.elastigroup_id, network_props)
 
           registry_settings = AgentSettings.new(
             agent_id,
@@ -149,12 +156,13 @@ module Bosh::AwsCloud
             agent_info,
             @config.agent
           )
-          registry.update_settings(instance.id, registry_settings.settings)
+          registry.update_settings(instance.ec2_instance.id, registry_settings.settings)
 
-          instance.id
+          logger.info("Instance created: #{instance.elastigroup_id}")
+          instance.elastigroup_id # return the elastigroup id instead of the actual instance id
         rescue => e # is this rescuing too much?
           logger.error(%Q[Failed to create instance: #{e.message}\n#{e.backtrace.join("\n")}])
-          instance.terminate(@config.aws.fast_path_delete?) if instance
+          @instance_manager.delete(instance.elastigroup_id, fast: @config.aws.fast_path_delete?) if instance
           raise e
         ensure
           ephemeral_disk_base_snapshot.delete if ephemeral_disk_base_snapshot
@@ -169,7 +177,7 @@ module Bosh::AwsCloud
     def delete_vm(instance_id)
       with_thread_name("delete_vm(#{instance_id})") do
         logger.info("Deleting instance '#{instance_id}'")
-        @instance_manager.find(instance_id).terminate(@config.aws.fast_path_delete?)
+        @instance_manager.delete(instance_id, fast: @config.aws.fast_path_delete?)
       end
     end
 
@@ -187,7 +195,10 @@ module Bosh::AwsCloud
     # @param [String] instance_id EC2 instance id
     def has_vm?(instance_id)
       with_thread_name("has_vm?(#{instance_id})") do
-        @instance_manager.find(instance_id).exists?
+        instance = @spotinst_manager.resolve_elastigroup(instance_id)
+        result = !instance.elastigroup_id.nil?
+        logger.debug("Result of has_vm? #{result}")
+        result
       end
     end
 
@@ -199,7 +210,7 @@ module Bosh::AwsCloud
     def set_vm_metadata(vm, metadata)
       metadata = Hash[metadata.map { |key, value| [key.to_s, value] }]
 
-      instance = @ec2_resource.instance(vm)
+      instance = @spotinst_manager.resolve_elastigroup(vm).ec2_instance
 
       job = metadata['job']
       index = metadata['index']
@@ -212,7 +223,11 @@ module Bosh::AwsCloud
         metadata['Name'] = "compiling/#{metadata['compiling']}"
       end
 
+      # Tag the instance.
       TagManager.tags(instance, metadata)
+
+      # Tag the elastigroup.
+      @spotinst_manager.tag_elastigroup(vm, metadata)
     rescue Aws::EC2::Errors::TagLimitExceeded => e
       logger.error("could not tag #{instance.id}: #{e.message}")
     end
@@ -227,6 +242,11 @@ module Bosh::AwsCloud
       raise ArgumentError, 'disk size needs to be an integer' unless size.kind_of?(Integer)
       with_thread_name("create_disk(#{size}, #{instance_id})") do
         props = @props_factory.disk_props(cloud_properties)
+
+        unless instance_id.nil?
+          instance = @instance_manager.find(instance_id)
+          instance_id = instance.id unless instance.nil?
+        end
 
         volume_properties = VolumeProperties.new(
           size: size,
@@ -276,7 +296,7 @@ module Bosh::AwsCloud
     # @param [String] disk_id EBS volume id of the disk to attach
     def attach_disk(instance_id, disk_id)
       with_thread_name("attach_disk(#{instance_id}, #{disk_id})") do
-        instance = @ec2_resource.instance(instance_id)
+        instance = @spotinst_manager.resolve_elastigroup(instance_id).ec2_instance
         volume = @ec2_resource.volume(disk_id)
 
         device_name = @volume_manager.attach_ebs_volume(instance, volume)
@@ -286,11 +306,11 @@ module Bosh::AwsCloud
           settings['disks']['persistent'] ||= {}
           settings['disks']['persistent'][disk_id] = device_name
         end
-        logger.info("Attached `#{disk_id}' to `#{instance_id}'")
-      end
+        logger.info("Attached `#{disk_id}' to `#{instance.id}'")
 
-      # log registry settings for debugging
-      logger.debug("updated registry settings: #{registry.read_settings(instance_id)}")
+        # log registry settings for debugging
+        logger.debug("updated registry settings: #{registry.read_settings(instance.id)}")
+      end
     end
 
     # Detach an EBS volume from an EC2 instance
@@ -298,13 +318,13 @@ module Bosh::AwsCloud
     # @param [String] disk_id EBS volume id of the disk to detach
     def detach_disk(instance_id, disk_id)
       with_thread_name("detach_disk(#{instance_id}, #{disk_id})") do
-        instance = @ec2_resource.instance(instance_id)
+        instance = @spotinst_manager.resolve_elastigroup(instance_id).ec2_instance
         volume = @ec2_resource.volume(disk_id)
 
         if has_disk?(disk_id)
           @volume_manager.detach_ebs_volume(instance, volume)
         else
-          @logger.info("Disk `#{disk_id}' not found while trying to detach it from vm `#{instance_id}'...")
+          @logger.info("Disk `#{disk_id}' not found while trying to detach it from vm `#{instance.id}'...")
         end
 
         update_agent_settings(instance) do |settings|
@@ -313,13 +333,14 @@ module Bosh::AwsCloud
           settings['disks']['persistent'].delete(disk_id)
         end
 
-        logger.info("Detached `#{disk_id}' from `#{instance_id}'")
+        logger.info("Detached `#{disk_id}' from `#{instance.id}'")
       end
     end
 
     def get_disks(vm_id)
       disks = []
-      @ec2_resource.instance(vm_id).block_device_mappings.each do |block_device|
+      instance = @spotinst_manager.resolve_elastigroup(vm_id).ec2_instance
+      instance.block_device_mappings.each do |block_device|
         if block_device.ebs
           disks << block_device.ebs.volume_id
         end
@@ -360,11 +381,11 @@ module Bosh::AwsCloud
         logger.info("snapshot '#{snapshot.id}' of volume '#{disk_id}' created")
 
         metadata.merge!({
-          'director' => metadata['director_name'],
-          'instance_index' => metadata['index'].to_s,
-          'instance_name' => metadata['job'] + '/' + metadata['instance_id'],
-          'Name' => name.join('/')
-        })
+                          'director' => metadata['director_name'],
+                          'instance_index' => metadata['index'].to_s,
+                          'instance_name' => metadata['job'] + '/' + metadata['instance_id'],
+                          'Name' => name.join('/')
+                        })
 
         ['director_name', 'index', 'job'].each do |tag|
           metadata.delete(tag)
@@ -449,9 +470,9 @@ module Bosh::AwsCloud
           # select the correct image for the configured ec2 client
           available_image = @ec2_resource.images(
             filters: [{
-              name: 'image-id',
-              values: props.ami_ids
-            }]
+                        name: 'image-id',
+                        values: props.ami_ids
+                      }]
           ).first
           raise Bosh::Clouds::CloudError, "Stemcell does not contain an AMI in region #{@config.aws.region}" unless available_image
 
@@ -554,7 +575,7 @@ module Bosh::AwsCloud
         unless instance.exists?
           cloud_error(
             "Could not locate the current VM with id '#{director_vm_id}'." +
-                'Ensure that the current VM is located in the same region as configured in the manifest.'
+              'Ensure that the current VM is located in the same region as configured in the manifest.'
           )
         end
 

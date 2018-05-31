@@ -16,12 +16,16 @@ params = {
         "encrypted" => p('aws.encrypted'),
         "kms_key_arn" => p('aws.kms_key_arn', nil)
       },
+      "spotinst" => {
+        "credentials_source" => p('spotinst.credentials_source'),
+        "token" => p('spotinst.token'),
+        "account" => p('spotinst.account')
+      },
       "registry" => {
         "endpoint" => "http://#{p('registry.username')}:#{ERB::Util.url_encode(p('registry.password'))}@#{p('registry.host')}:#{p('registry.port')}",
         "user" => p('registry.username'),
         "password" => p('registry.password')
       },
-
       "agent" => {
         "ntp" => p('ntp')
       }

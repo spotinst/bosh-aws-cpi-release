@@ -6,7 +6,8 @@ module Bosh::AwsCloud
   class InstanceManager
     include Helpers
 
-    def initialize(ec2, registry, logger)
+    def initialize(spotinst, ec2, registry, logger)
+      @spotinst = spotinst
       @ec2 = ec2
       @registry = registry
       @logger = logger
@@ -35,10 +36,11 @@ module Bosh::AwsCloud
         )
         @logger.info("Creating new instance with: #{redacted_instance_params.inspect}")
 
-        aws_instance = create_aws_instance(instance_params, vm_cloud_props)
-        instance = Bosh::AwsCloud::Instance.new(aws_instance, @registry, @logger)
+        instance = create_aws_instance(instance_params, vm_cloud_props)
+        aws_instance = Bosh::AwsCloud::Instance.new(instance.ec2_instance, @registry, @logger)
 
-        babysit_instance_creation(instance, vm_cloud_props)
+        babysit_instance_creation(aws_instance, vm_cloud_props)
+        instance
       rescue => e
         if e.is_a?(Bosh::AwsCloud::AbruptlyTerminated)
           @logger.warn("Failed to configure instance '#{instance.id}': #{e.inspect}")
@@ -55,7 +57,13 @@ module Bosh::AwsCloud
 
     # @param [String] instance_id EC2 instance id
     def find(instance_id)
-      Instance.new(@ec2.instance(instance_id), @registry, @logger)
+      instance = @spotinst.resolve_elastigroup(instance_id)
+      Instance.new(instance.ec2_instance, @registry, @logger)
+    end
+
+    def delete(instance_id, fast: false)
+      deleted = @spotinst.delete_elastigroup(instance_id)
+      find(instance_id).terminate(fast) unless deleted
     end
 
     private
@@ -99,44 +107,11 @@ module Bosh::AwsCloud
       @param_mapper.instance_params
     end
 
-    def create_aws_spot_instance(launch_specification, spot_bid_price)
-      @logger.info('Launching spot instance...')
-      spot_manager = Bosh::AwsCloud::SpotManager.new(@ec2)
-
-      spot_manager.create(launch_specification, spot_bid_price)
-    end
-
     def create_aws_instance(instance_params, vm_cloud_props)
-      if vm_cloud_props.spot_bid_price
-        begin
-          return create_aws_spot_instance(instance_params, vm_cloud_props.spot_bid_price)
-        rescue Bosh::Clouds::VMCreationFailed => e
-          if vm_cloud_props.spot_ondemand_fallback
-            @logger.info("Spot instance creation failed with this message: #{e.message}; will create ondemand instance because `spot_ondemand_fallback` is set.")
-          else
-            message = "Spot instance creation failed: #{e.inspect}"
-            @logger.warn(message)
-            raise e, message
-          end
-        end
-      end
-
       instance_params[:min_count] = 1
       instance_params[:max_count] = 1
 
-      # Retry the create instance operation a couple of times if we are told that the IP
-      # address is in use - it can happen when the director recreates a VM and AWS
-      # is too slow to update its state when we have released the IP address and want to
-      # reallocate it again.
-      errors = [Aws::EC2::Errors::InvalidIPAddressInUse]
-      Bosh::Common.retryable(sleep: instance_create_wait_time, tries: 20, on: errors) do |tries, error|
-        @logger.info('Launching on demand instance...')
-        if error.class == Aws::EC2::Errors::InvalidIPAddressInUse
-          @logger.warn("IP address was in use: #{error}")
-        end
-        resp = @ec2.client.run_instances(instance_params)
-        @ec2.instance(get_created_instance_id(resp))
-      end
+      @spotinst.create_elastigroup(instance_params, vm_cloud_props)
     end
 
     def get_created_instance_id(resp)
@@ -153,9 +128,9 @@ module Bosh::AwsCloud
       end
       filtered_subnets = @ec2.subnets(
         filters: [{
-          name: 'subnet-id',
-          values: subnet_ids
-        }]
+                    name: 'subnet-id',
+                    values: subnet_ids
+                  }]
       )
 
       filtered_subnets.inject({}) do |mapping, subnet|

@@ -22,6 +22,7 @@ require 'cloud/aws/cloud'
 require 'cloud/aws/config'
 require 'cloud/aws/aws_provider'
 require 'cloud/aws/cloud_props'
+require 'cloud/aws/spotinst'
 
 require 'cloud/aws/agent_settings'
 
